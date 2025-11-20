@@ -1,28 +1,25 @@
 from ultralytics import YOLO
 import cv2
-import imageio_ffmpeg as ffmpeg
 import numpy as np
 
 # Загружаем модель
-model = YOLO("yolov8n-pose.pt")   # или yolov11n-pose.pt
+model = YOLO("yolov8n-pose.pt")
 
-# Параметры твоего видео (посмотри в терминале, какие размеры выводит YOLO)
-# У тебя было: 416x640 → меняем на (ширина, высота) = (640, 416)
+# Параметры видео
 width, height = 640, 416
 
-# Создаём писатель через ffmpeg (работает ВЕЗДЕ)
-writer = ffmpeg.get_writer(
-    'output_with_pose.mp4',
-    fps=30,
-    codec='libx264',           # самый совместимый кодек
-    pixel_format='yuv420p',    # важен для плееров и браузеров
-    output_params=['-preset', 'fast']
-)
+# Создаём VideoWriter для сохранения видео
+fourcc = cv2.VideoWriter_fourcc(*'mp4v')  # кодек для MP4
+out = cv2.VideoWriter('output_with_pose.mp4', fourcc, 30.0, (width, height))
 
 print("Начинаю обработку... Нажми 'q' в окне, если захочешь остановить раньше.")
 
+# Создаем окно с правильным размером
+cv2.namedWindow("YOLOv8-pose — всё работает!", cv2.WINDOW_NORMAL)
+cv2.resizeWindow("YOLOv8-pose — всё работает!", width, height)
+
 results = model.track(
-    source="video.webm",
+    source="video.mp4",
     stream=True,
     persist=True,
     tracker="bytetrack.yaml",
@@ -33,18 +30,22 @@ results = model.track(
 for result in results:
     frame = result.plot()  # уже в RGB
 
-    # OpenCV работает в BGR, а ffmpeg хочет RGB → конвертируем
+    # Конвертируем RGB в BGR для OpenCV
     frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+    
+    # Изменяем размер кадра до нужного размера
+    frame_resized = cv2.resize(frame_bgr, (width, height))
 
-    # Показываем (если хочешь видеть онлайн)
-    cv2.imshow("YOLOv8-pose — всё работает!", frame_bgr)
+    # Показываем в окне
+    cv2.imshow("YOLOv8-pose — всё работает!", frame_resized)
+    
+    # Сохраняем кадр в видео
+    out.write(frame_resized)
+    
     if cv2.waitKey(1) & 0xFF == ord('q'):
         break
 
-    # Записываем кадр
-    writer.write_frame(frame_bgr)
-
 # Закрываем всё
-writer.close()
+out.release()
 cv2.destroyAllWindows()
 print("ГОТОВО! Видео сохранено как output_with_pose.mp4 — открывай любым плеером!")
