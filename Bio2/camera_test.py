@@ -103,3 +103,44 @@ while True:
 cap.release()
 cv2.destroyAllWindows()
 logger.info(f"Тест завершён. Всего аномалий сохранено: {real_anomalies} → папка anomalies/")
+
+print("Обучаем ML-модели на синтетических данных...")
+
+import joblib
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.svm import OneClassSVM
+from sklearn.ensemble import IsolationForest
+from sklearn.preprocessing import StandardScaler
+import numpy as np
+
+# Генерируем 100 "нормальных" людей (мужчины/женщины)
+np.random.seed(42)
+n_samples = 100
+heights_m = np.random.normal(175, 8, n_samples//2)  # мужчины
+shoulders_m = np.random.normal(45, 4, n_samples//2)
+heights_f = np.random.normal(162, 7, n_samples//2)  # женщины
+shoulders_f = np.random.normal(38, 3, n_samples//2)
+
+# Объединяем
+X = np.vstack([
+    np.column_stack([heights_m, shoulders_m, shoulders_m/heights_m, np.ones(n_samples//2)]),
+    np.column_stack([heights_f, shoulders_f, shoulders_f/heights_f, np.zeros(n_samples//2)])
+])
+
+# Обучаем gender classifier
+gender_clf = RandomForestClassifier(n_estimators=100, random_state=42)
+gender_clf.fit(X[:, :3], X[:, 3])
+joblib.dump(gender_clf, 'ml/data/gender_model.pkl')
+
+# Обучаем anomaly detectors
+scaler = StandardScaler()
+X_scaled = scaler.fit_transform(X)
+svm = OneClassSVM(kernel='rbf', nu=0.05)
+svm.fit(X_scaled)
+joblib.dump(svm, 'ml/data/svm_model.pkl')
+forest = IsolationForest(contamination=0.05, random_state=42)
+forest.fit(X_scaled)
+joblib.dump(forest, 'ml/data/forest_model.pkl')
+joblib.dump(scaler, 'ml/data/anomaly_scaler.pkl')
+
+print("✅ Модели обучены и сохранены! Перезапусти сервер.")
