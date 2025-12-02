@@ -7,13 +7,13 @@ from typing import Dict, Any
 from loguru import logger
 import cv2 
 
-# --- КОНФИГУРАЦИЯ СКЕЛЕТА (для рисования на сервере) ---
+DISPLAY_MAX_WIDTH = 1000
+
 SKELETON_CONNECTIONS = [
     (15, 13), (13, 11), (16, 14), (14, 12), (11, 12), 
     (5, 11), (6, 12), (5, 6), (5, 7), (6, 8), (7, 9), (8, 10), 
     (1, 2), (0, 1), (0, 2), (0, 3), (0, 4), (3, 5), (4, 6)
 ]
-# --------------------------------------------------------
 
 class TrackingService:
     def __init__(self):
@@ -27,7 +27,6 @@ class TrackingService:
         self.geometry = GeometryEngine()
         self.auditor = AnomalyAuditor()
         
-        # Хранилище состояний: {track_id: PersonState}
         self.states: Dict[int, PersonState] = {}
         self.gc_interval = 5.0 
         self.last_gc_time = time.time()
@@ -48,15 +47,12 @@ class TrackingService:
         
         self.frame_counter += 1
         
-        # 1. Применяем гомографию (если включена)
         processed_frame = self.geometry.normalize_frame(frame)
         
-        # 2. Логика пропуска кадров
         should_process = (self.frame_counter % (settings.SKIP_FRAMES + 1) == 0)
         
         if not should_process:
             if settings.SERVER_DEBUG_DISPLAY:
-                # Отображаем просто кадр, что инференс пропущен
                 vis_frame = processed_frame.copy()
                 calib_status = "CALIBRATED" if self.geometry.is_calibrated else "CALIBRATING..."
                 calib_color = (0, 255, 0) if self.geometry.is_calibrated else (0, 165, 255)
@@ -64,7 +60,14 @@ class TrackingService:
                 cv2.putText(vis_frame, f"STATUS: SKIPPED", (50, 60), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 2)
                 cv2.putText(vis_frame, calib_status, (50, 100), cv2.FONT_HERSHEY_SIMPLEX, 1, calib_color, 2)
                 
-                cv2.imshow('Server Debug View', vis_frame)
+                frame_to_show = vis_frame.copy()
+                if frame_to_show.shape[1] > DISPLAY_MAX_WIDTH:
+                    scale = DISPLAY_MAX_WIDTH / frame_to_show.shape[1]
+                    h = int(frame_to_show.shape[0] * scale)
+                    w = DISPLAY_MAX_WIDTH
+                    frame_to_show = cv2.resize(frame_to_show, (w, h), interpolation=cv2.INTER_LINEAR)
+                    
+                cv2.imshow('Server Debug View', frame_to_show)
                 cv2.waitKey(1)
             
             return {"processed_at": float(time.time()), 
@@ -76,9 +79,6 @@ class TrackingService:
                     "skipped": True 
                     }
         
-        # Кадр обрабатывается (Инференс)
-            
-        # 3. Трекинг на обработанном кадре
         results = self.model.track(
             processed_frame, 
             persist=True, 
@@ -97,7 +97,6 @@ class TrackingService:
             self._cleanup_states()
             self.last_gc_time = now
 
-        # Инициализация кадра для отображения (если отладка включена)
         vis_frame = processed_frame.copy()
         if settings.SERVER_DEBUG_DISPLAY:
             calib_status = "CALIBRATED" if self.geometry.is_calibrated else "CALIBRATING..."
@@ -125,16 +124,13 @@ class TrackingService:
                     "kpts": kps
                 }
                 
-                # 4. Расчет признаков 
                 features = self.auditor.compute_feature_vector(kps_data, state, self.geometry)
                 state.add_height(features.get('height_cm', 0.0))
                 
-                # Авто-калибровка
                 if not self.geometry.is_calibrated:
                     if features.get('bbox_height_px', 0) > 0:
                         self.geometry.calibrate_simple(features['bbox_height_px'], settings.REFERENCE_HEIGHT_CM)
 
-                # 5. Аудит аномалий
                 alerts = self.auditor.audit(features)
                 
                 kpts_list = kps.xy[0].cpu().numpy().tolist() if hasattr(kps, 'xy') else []
@@ -159,38 +155,38 @@ class TrackingService:
                     
                 people_meta.append(person_meta)
 
-                # --- Рисование на отладочном кадре сервера ---
                 if settings.SERVER_DEBUG_DISPLAY:
-                    # Координаты уже в пространстве vis_frame
                     x1, y1, x2, y2 = [int(i.item()) for i in box.xyxy[0]]
                     keypoints_int = kps.xy[0].cpu().numpy().astype(int)[:, :2]
 
-                    # 1. Box
                     cv2.rectangle(vis_frame, (x1, y1), (x2, y2), color, 2)
                     
-                    # 2. Skeleton
                     for i, j in SKELETON_CONNECTIONS:
                         p1 = keypoints_int[i]
                         p2 = keypoints_int[j]
                         if p1[0] > 0 and p2[0] > 0:
                             cv2.line(vis_frame, tuple(p1), tuple(p2), color, 2)
 
-                    # 3. Points
                     for x, y in keypoints_int:
                         if x > 0 and y > 0:
                             cv2.circle(vis_frame, (x, y), 4, (255, 0, 0), -1)
 
-                    # 4. Text
                     status_text = f"ID {tid} | Status: {person_meta['status']}"
                     info_text = f"H={features.get('height_cm', 0):.1f}cm, Ratio={features.get('ratio_sh_h', 0):.2f}"
 
                     cv2.putText(vis_frame, status_text, (x1, y1 - 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
                     cv2.putText(vis_frame, info_text, (x1, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
 
-        # --- Финальное отображение (после обработки всех людей) ---
         if settings.SERVER_DEBUG_DISPLAY:
-            cv2.imshow('Server Debug View', vis_frame)
-            cv2.waitKey(1) # Небольшая задержка для обновления окна
+            frame_to_show = vis_frame.copy() 
+            if frame_to_show.shape[1] > DISPLAY_MAX_WIDTH:
+                scale = DISPLAY_MAX_WIDTH / frame_to_show.shape[1]
+                h = int(frame_to_show.shape[0] * scale)
+                w = DISPLAY_MAX_WIDTH
+                frame_to_show = cv2.resize(frame_to_show, (w, h), interpolation=cv2.INTER_LINEAR)
+
+            cv2.imshow('Server Debug View', frame_to_show)
+            cv2.waitKey(1)
         
         final_response = {
             "processed_at": float(time.time()),

@@ -91,7 +91,7 @@ class GeometryEngine:
         if len(self.height_samples) >= 15 and (time.time() - self.last_calib_time > 1.0):
             median_px = statistics.median(self.height_samples)
             
-            if median_px > 50: # Порог можно снизить, так как на warped image люди могут быть дальше
+            if median_px > 50:
                 self.px_to_cm_ratio = float(ref_height_cm) / float(median_px) 
                 self.is_calibrated = True
                 self.last_calib_time = time.time()

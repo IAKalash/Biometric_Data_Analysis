@@ -9,11 +9,13 @@ from config_opt import settings
 
 os.environ["QT_QPA_PLATFORM"] = "xcb" 
 
+INPUT_FILE_PATH = os.path.join("data", "video.webm") 
+DISPLAY_MAX_WIDTH = 1000 
+
 TARGET_SIZE: Tuple[int, int] = settings.TARGET_SIZE 
 TARGET_W, TARGET_H = TARGET_SIZE
 HOMOGRAPHY_FILE = settings.HOMOGRAPHY_MATRIX_PATH 
-OFFSET = 0
-
+OFFSET = 0 
 
 TARGET_PTS_COORDS = np.array([
     [OFFSET, OFFSET],
@@ -24,10 +26,9 @@ TARGET_PTS_COORDS = np.array([
 
 source_points = []
 current_source_image = None
+original_frame_cache = None
 window_name = "Homography Calibration (Source)"
-INPUT_PATH_FALLBACK = os.path.join("data", "image.png")
 
-# Обработчик сбора точек на изображении
 def click_event(event, x, y, flags, param):
     """Сбор 4-х точек на исходном кадре."""
     global source_points, current_source_image
@@ -41,11 +42,10 @@ def click_event(event, x, y, flags, param):
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
 
             logger.info(f"Точка {len(source_points)}/4 выбрана: ({x}, {y})")
-
-# Рассчитывает матрицу H и сохраняет ее в JSON     
-def calculate_homography(original_frame: np.ndarray):
+ 
+def calculate_homography():
     """Рассчитывает и сохраняет матрицу гомографии H."""
-    global source_points, TARGET_PTS_COORDS, TARGET_SIZE
+    global source_points, TARGET_PTS_COORDS, TARGET_SIZE, original_frame_cache
 
     if len(source_points) != 4:
         logger.error("Ошибка: Выберите ровно 4 исходные точки.")
@@ -72,13 +72,24 @@ def calculate_homography(original_frame: np.ndarray):
     logger.info(f"   Размер выходного изображения: {TARGET_SIZE}")
     print("=" * 50)
 
-    # Проверка результата
+    if original_frame_cache is None: 
+         logger.error("Внутренняя ошибка: Отсутствует оригинальный кадр для проверки.")
+         return True
+    
     normalized_frame = cv2.warpPerspective(
-        original_frame, 
+        original_frame_cache, 
         H, 
         TARGET_SIZE
     )
-    cv2.imshow("Normalized Output Check", normalized_frame)
+    
+    frame_to_show = normalized_frame.copy()
+    if frame_to_show.shape[1] > DISPLAY_MAX_WIDTH:
+        scale = DISPLAY_MAX_WIDTH / frame_to_show.shape[1]
+        h = int(frame_to_show.shape[0] * scale)
+        w = DISPLAY_MAX_WIDTH
+        frame_to_show = cv2.resize(frame_to_show, (w, h), interpolation=cv2.INTER_LINEAR)
+
+    cv2.imshow("Normalized Output Check", frame_to_show)
     cv2.waitKey(0)
     
     return True
@@ -89,12 +100,12 @@ def get_frame_from_input(input_path: str) -> Optional[np.ndarray]:
         logger.error(f"Входной файл не найден: {input_path}")
         return None
 
-    # Проверка на изображение
+    # Изображение
     if input_path.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp')):
         logger.info(f"Загрузка кадра из изображения: {input_path}")
         return cv2.imread(input_path)
 
-    # Проверка на видео
+    # Видео
     if input_path.lower().endswith(('.mp4', '.avi', '.mov', '.webm')):
         logger.info(f"Загрузка первого кадра из видео: {input_path}")
         cap = cv2.VideoCapture(input_path)
@@ -118,22 +129,15 @@ def get_frame_from_input(input_path: str) -> Optional[np.ndarray]:
 
 if __name__ == "__main__":
     
-    # 1. Определение входного файла
-    if len(sys.argv) > 1:
-        input_file_path = sys.argv[1]
-    else:
-        # Fallback на тестовое изображение, если нет аргумента
-        input_file_path = INPUT_PATH_FALLBACK
-        logger.warning(f"Не указан входной файл. Используется путь по умолчанию: {input_file_path}")
+    input_file_path = INPUT_FILE_PATH
 
-    # 2. Загрузка кадра
     original_frame = get_frame_from_input(input_file_path)
     
     if original_frame is None:
-        logger.error("Не удалось загрузить кадр для калибровки. Проверьте путь и формат файла.")
         sys.exit(1)
         
     current_source_image = original_frame.copy()
+    original_frame_cache = original_frame
     
     cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
     cv2.setMouseCallback(window_name, click_event)
@@ -155,7 +159,7 @@ if __name__ == "__main__":
         key = cv2.waitKey(10)
         
         if key == 13 and len(source_points) == 4:
-            calculate_homography(original_frame)
+            calculate_homography()
             break
         
         if key == 27:

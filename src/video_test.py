@@ -8,14 +8,6 @@ from datetime import datetime
 from loguru import logger
 from typing import Dict, Any, List, Tuple, Optional
 
-# --- КОНФИГУРАЦИЯ СКЕЛЕТА (для рисования) ---
-SKELETON_CONNECTIONS = [
-    (15, 13), (13, 11), (16, 14), (14, 12), (11, 12), 
-    (5, 11), (6, 12), (5, 6), (5, 7), (6, 8), (7, 9), (8, 10), 
-    (1, 2), (0, 1), (0, 2), (0, 3), (0, 4), (3, 5), (4, 6)
-]
-
-# ================= КОНФИГУРАЦИЯ КЛИЕНТА =================
 VIDEO_FILENAME = "video.webm" 
 DATA_DIR = "data"
 VIDEO_PATH = os.path.join(DATA_DIR, VIDEO_FILENAME)
@@ -26,18 +18,20 @@ STATUS_URL = "http://localhost:8000/status"
 ANOMALY_DIR = "anomalies"
 os.makedirs(ANOMALY_DIR, exist_ok=True)
 
-# Настройки Homography (для обратной проекции)
+# Настройки Гомографии
 HOMOGRAPHY_MATRIX_PATH = "models/H_cam_01.json" 
 HOMOGRAPHY_ENABLED = True
 
 # Настройки Отображения
-# Клиент отправляет полноразмерный кадр.
-DISPLAY_MAX_WIDTH = 1280 # Максимальная ширина для отображения на экране
-# ===============================================
+DISPLAY_MAX_WIDTH = 1280
 
 logger.info(f"Аномалии будут сохраняться в папку: {ANOMALY_DIR}/")
 
-# --- УТИЛИТЫ ГОМОГРАФИИ ---
+SKELETON_CONNECTIONS = [
+    (15, 13), (13, 11), (16, 14), (14, 12), (11, 12), 
+    (5, 11), (6, 12), (5, 6), (5, 7), (6, 8), (7, 9), (8, 10), 
+    (1, 2), (0, 1), (0, 2), (0, 3), (0, 4), (3, 5), (4, 6)
+]
 
 def load_homography_matrix(path: str) -> Optional[np.ndarray]:
     """Загружает матрицу H из JSON."""
@@ -59,20 +53,15 @@ def project_points(points: np.ndarray, H_inv: np.ndarray) -> np.ndarray:
     if H_inv is None or points.size == 0:
         return points.astype(int) 
         
-    # Преобразование [x, y] в гомогенные координаты [x, y, 1]
     ones = np.ones((points.shape[0], 1))
     pts_homogeneous_warped = np.hstack([points, ones])
     
-    # Применяем обратную матрицу: H_inv * P_warped
     pts_homogeneous_original = H_inv @ pts_homogeneous_warped.T
-    
-    # Нормализация (деление на третий компонент)
+
     pts_original = pts_homogeneous_original[:2] / pts_homogeneous_original[2]
-    
-    # Транспонирование обратно в формат (N, 2) и округление
+
     return pts_original.T.astype(int)
 
-# --- Вспомогательные функции API ---
 
 def get_api_status() -> Dict[str, Any]:
     """Получает статус калибровки и соотношение px/cm с сервера."""
@@ -91,7 +80,6 @@ def get_api_status() -> Dict[str, Any]:
 def process_frame(frame: np.ndarray) -> Optional[Dict[str, Any]]:
     """Кодирует и отправляет полноразмерный кадр на сервер для анализа."""
     try:
-        # Кодирование полноразмерного кадра в JPEG для отправки
         _, img_encoded = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
         files = {'file': ('frame.jpg', img_encoded.tobytes(), 'image/jpeg')}
         
@@ -106,22 +94,17 @@ def process_frame(frame: np.ndarray) -> Optional[Dict[str, Any]]:
         logger.error(f"Request failed: {e}")
         return None
 
-# --- ФУНКЦИЯ РИСОВАНИЯ (ОБНОВЛЕНА) ---
-
 def draw_info(frame: np.ndarray, meta: List[Dict], status: Dict, H_inv: Optional[np.ndarray]) -> np.ndarray:
     """Рисует результаты на исходном кадре (с обратной проекцией)."""
     vis_frame = frame.copy()
     
-    # 1. Информация о калибровке
     calib_status = "CALIBRATED" if status.get('calibration') else "CALIBRATING..."
     calib_color = (0, 255, 0) if status.get('calibration') else (0, 165, 255)
     cv2.putText(vis_frame, f"Calibration: {calib_status} (1px={status.get('px_to_cm_ratio', 0.0):.3f}cm)", 
                 (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, calib_color, 2)
     
-    # 2. Рисование результатов
     for person in meta:
         
-        # NOTE: Box и keypoints уже в нормированном пространстве (как вернул сервер)
         box = np.array(person.get('box')).reshape(-1, 2) 
         keypoints = np.array(person.get('keypoints'))[:, :2] 
         
@@ -129,39 +112,31 @@ def draw_info(frame: np.ndarray, meta: List[Dict], status: Dict, H_inv: Optional
         person_status = person.get('status')
         features = person.get('features', {})
 
-        # --- ОБРАТНАЯ ГОМОГРАФИЯ ---
         if HOMOGRAPHY_ENABLED and H_inv is not None:
             box_original_pts = project_points(box, H_inv)
-            # Извлекаем x1, y1, x2, y2 из проекции двух углов
             x1, y1 = box_original_pts[0]
             x2, y2 = box_original_pts[1]
             keypoints_original = project_points(keypoints, H_inv)
         else:
-            # Используем сырые координаты, если H_inv недоступна (для отладки)
             x1, y1, x2, y2 = [int(i) for i in person.get('box')] 
             keypoints_original = keypoints.astype(int)
 
-        # 3. Рисование Бокса и Скелета
         color = (0, 255, 0)
         if person_status == 'ANOMALY':
             color = (0, 0, 255)
         
         cv2.rectangle(vis_frame, (x1, y1), (x2, y2), color, 2)
         
-        # Скелет
         for i, j in SKELETON_CONNECTIONS:
             p1 = keypoints_original[i]
             p2 = keypoints_original[j]
-            # Проверяем, что точки валидны (x > 0)
             if p1[0] > 0 and p2[0] > 0:
                  cv2.line(vis_frame, tuple(p1), tuple(p2), color, 2)
 
-        # Точки
         for x, y in keypoints_original:
             if x > 0 and y > 0:
                 cv2.circle(vis_frame, (x, y), 4, (255, 0, 0), -1)
 
-        # Текст (ID, Features)
         status_text = f"ID {person_id} | Status: {person_status}"
         info_text = f"H={features.get('height_cm', 0):.1f}cm, W={features.get('shoulder_width_cm', 0):.1f}cm"
 
@@ -170,7 +145,6 @@ def draw_info(frame: np.ndarray, meta: List[Dict], status: Dict, H_inv: Optional
 
     return vis_frame
 
-# --- Основная функция ---
 
 def run_video_test():
     """Основной цикл для чтения видео, отправки кадров и отображения результатов."""
@@ -178,7 +152,6 @@ def run_video_test():
         logger.error(f"Видеофайл не найден: {VIDEO_PATH}")
         return
 
-    # 1. ЗАГРУЗКА ГОМОГРАФИИ
     H_matrix = load_homography_matrix(HOMOGRAPHY_MATRIX_PATH)
     H_inv = np.linalg.inv(H_matrix) if HOMOGRAPHY_ENABLED and H_matrix is not None else None
 
@@ -196,11 +169,9 @@ def run_video_test():
     last_anomaly_save_time = time.time()
     frame_count = 0
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    
-    # --- НОВОЕ: Состояние для интерполяции ---
+
     last_valid_meta: List[Dict] = []
-    last_status: Dict = get_api_status() # Загружаем статус до первого кадра
-    # ----------------------------------------
+    last_status: Dict = get_api_status()
     
     while True:
         ret, frame = cap.read()
@@ -210,37 +181,33 @@ def run_video_test():
         
         frame_count += 1
         
-        # Обработка кадра
         api_result = process_frame(frame.copy()) 
         current_status = get_api_status()
-        last_status = current_status # Всегда обновляем текущий статус калибровки
+        last_status = current_status
         
         meta_to_draw = []
         anomalies_list = []
         mode_text = "INTERPOLATING"
-        mode_color = (0, 165, 255) # Оранжевый
+        mode_color = (0, 165, 255)
 
         if api_result:
             if not api_result.get('skipped'):
-                # Свежий кадр: обновляем состояние
                 last_valid_meta = api_result.get('meta', [])
                 meta_to_draw = last_valid_meta
                 anomalies_list = api_result.get('anomalies', [])
                 mode_text = "PROCESSED"
-                mode_color = (0, 255, 0) # Зеленый
+                mode_color = (0, 255, 0)
             else:
-                # Пропущенный кадр: используем последнее известное состояние
                 meta_to_draw = last_valid_meta
-                # anomalies_list остается пустым, чтобы не сохранять аномалии на каждом кадре
 
-            # 1. Рисование результатов
+            # Результаты
             frame_to_show = draw_info(frame, meta_to_draw, last_status, H_inv)
             
-            # Добавляем режим работы
+            # Режим работы
             cv2.putText(frame_to_show, f"Mode: {mode_text}", 
                         (frame_to_show.shape[1] - 300, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, mode_color, 2)
             
-            # Сохранение аномалий (только если они были в свежем, непропущенном кадре)
+            # Сохранение аномалий
             if anomalies_list and time.time() - last_anomaly_save_time > 1.0:
                 logger.warning(f"Anomalies detected: {len(anomalies_list)} in frame {frame_count}")
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -249,13 +216,11 @@ def run_video_test():
                 last_anomaly_save_time = time.time()
                 
         else:
-            # API недоступен, рисуем последний известный статус
             frame_to_show = draw_info(frame, last_valid_meta, last_status, H_inv)
             cv2.putText(frame_to_show, "API ERROR", 
                         (frame_to_show.shape[1] - 300, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
 
 
-        # 2. РЕСАЙЗ для отображения клиентского кадра
         if frame_to_show.shape[1] > DISPLAY_MAX_WIDTH:
             scale = DISPLAY_MAX_WIDTH / frame_to_show.shape[1]
             h = int(frame_to_show.shape[0] * scale)
