@@ -7,6 +7,7 @@ import json
 from datetime import datetime
 from loguru import logger
 from typing import Dict, Any, List, Tuple, Optional
+from config_opt import settings
 
 VIDEO_FILENAME = "video.webm" 
 DATA_DIR = "data"
@@ -20,7 +21,6 @@ os.makedirs(ANOMALY_DIR, exist_ok=True)
 
 # Настройки Гомографии
 HOMOGRAPHY_MATRIX_PATH = "models/H_cam_01.json" 
-HOMOGRAPHY_ENABLED = True
 
 # Настройки Отображения
 DISPLAY_MAX_WIDTH = 1280
@@ -32,6 +32,8 @@ SKELETON_CONNECTIONS = [
     (5, 11), (6, 12), (5, 6), (5, 7), (6, 8), (7, 9), (8, 10), 
     (1, 2), (0, 1), (0, 2), (0, 3), (0, 4), (3, 5), (4, 6)
 ]
+
+HOMOGRAPHY_ENABLED = settings.HOMOGRAPHY_ENABLED
 
 def load_homography_matrix(path: str) -> Optional[np.ndarray]:
     """Загружает матрицу H из JSON."""
