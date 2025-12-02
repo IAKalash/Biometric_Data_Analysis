@@ -3,17 +3,15 @@ import numpy as np
 import json
 import os
 import sys
+from loguru import logger
+from typing import Optional, Tuple
+from config_opt import settings
 
 os.environ["QT_QPA_PLATFORM"] = "xcb" 
 
-CAMERA_NAME = "cam_01"          
-DATA_DIR = "data"               
-MODELS_DIR = "models"           
-TEST_FRAME_NAME = "image.png" 
-
-# Параметры целевого изображения
-TARGET_SIZE = (1500, 1000)
+TARGET_SIZE: Tuple[int, int] = settings.TARGET_SIZE 
 TARGET_W, TARGET_H = TARGET_SIZE
+HOMOGRAPHY_FILE = settings.HOMOGRAPHY_MATRIX_PATH 
 OFFSET = 0
 
 
@@ -24,15 +22,14 @@ TARGET_PTS_COORDS = np.array([
     [OFFSET, TARGET_H - OFFSET]
 ], dtype=np.float32)
 
-TEST_FRAME_PATH = os.path.join(DATA_DIR, TEST_FRAME_NAME)
-HOMOGRAPHY_FILE = os.path.join(MODELS_DIR, f"H_{CAMERA_NAME}.json")
-
 source_points = []
 current_source_image = None
 window_name = "Homography Calibration (Source)"
+INPUT_PATH_FALLBACK = os.path.join("data", "image.png")
 
 # Обработчик сбора точек на изображении
 def click_event(event, x, y, flags, param):
+    """Сбор 4-х точек на исходном кадре."""
     global source_points, current_source_image
 
     if event == cv2.EVENT_LBUTTONDOWN:
@@ -43,14 +40,15 @@ def click_event(event, x, y, flags, param):
             cv2.putText(current_source_image, str(len(source_points)), (x + 10, y + 10), 
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
 
-            print(f"Точка {len(source_points)}/4 выбрана: ({x}, {y})")
+            logger.info(f"Точка {len(source_points)}/4 выбрана: ({x}, {y})")
 
 # Рассчитывает матрицу H и сохраняет ее в JSON     
-def calculate_homography():
+def calculate_homography(original_frame: np.ndarray):
+    """Рассчитывает и сохраняет матрицу гомографии H."""
     global source_points, TARGET_PTS_COORDS, TARGET_SIZE
 
     if len(source_points) != 4:
-        print("Ошибка: Выберите ровно 4 исходные точки.")
+        logger.error("Ошибка: Выберите ровно 4 исходные точки.")
         return False
     
     src_pts = np.array(source_points, dtype=np.float32)
@@ -59,22 +57,22 @@ def calculate_homography():
     H, _ = cv2.findHomography(src_pts, dst_pts)
     
     if H is None:
-        print("Ошибка: Не удалось рассчитать матрицу гомографии.")
+        logger.error("Ошибка: Не удалось рассчитать матрицу гомографии.")
         return False
 
     H_list = H.tolist()
-    os.makedirs(MODELS_DIR, exist_ok=True)
+    os.makedirs(os.path.dirname(HOMOGRAPHY_FILE) or '.', exist_ok=True)
     
     with open(HOMOGRAPHY_FILE, 'w') as f:
         json.dump(H_list, f, indent=4)
         
     print("\n" + "=" * 50)
-    print(f"Матрица гомографии H успешно рассчитана и сохранена:")
-    print(f"   Файл: {HOMOGRAPHY_FILE}")
-    print(f"   Размер выходного изображения: {TARGET_SIZE}")
+    logger.success(f"Матрица гомографии H успешно рассчитана и сохранена:")
+    logger.info(f"   Файл: {HOMOGRAPHY_FILE}")
+    logger.info(f"   Размер выходного изображения: {TARGET_SIZE}")
     print("=" * 50)
 
-    original_frame = cv2.imread(TEST_FRAME_PATH)
+    # Проверка результата
     normalized_frame = cv2.warpPerspective(
         original_frame, 
         H, 
@@ -85,17 +83,54 @@ def calculate_homography():
     
     return True
 
+def get_frame_from_input(input_path: str) -> Optional[np.ndarray]:
+    """Загружает кадр из изображения или извлекает первый кадр из видео."""
+    if not os.path.exists(input_path):
+        logger.error(f"Входной файл не найден: {input_path}")
+        return None
+
+    # Проверка на изображение
+    if input_path.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp')):
+        logger.info(f"Загрузка кадра из изображения: {input_path}")
+        return cv2.imread(input_path)
+
+    # Проверка на видео
+    if input_path.lower().endswith(('.mp4', '.avi', '.mov', '.webm')):
+        logger.info(f"Загрузка первого кадра из видео: {input_path}")
+        cap = cv2.VideoCapture(input_path)
+        if not cap.isOpened():
+            logger.error(f"Не удалось открыть видеофайл: {input_path}")
+            return None
+
+        ret, frame = cap.read()
+        cap.release()
+        
+        if ret:
+            logger.info(f"Кадр успешно извлечен из видео. Размер: {frame.shape[1]}x{frame.shape[0]}")
+            return frame
+        else:
+            logger.error("Не удалось прочитать первый кадр из видео.")
+            return None
+            
+    logger.error(f"Неподдерживаемый формат файла: {input_path}")
+    return None
+
 
 if __name__ == "__main__":
     
-    if not os.path.exists(TEST_FRAME_PATH):
-        print(f"[ERROR] Не найден тестовый кадр: {TEST_FRAME_PATH}")
-        print(f"Пожалуйста, поместите {TEST_FRAME_NAME} в папку '{DATA_DIR}' и перезапустите.")
-        sys.exit(1)
+    # 1. Определение входного файла
+    if len(sys.argv) > 1:
+        input_file_path = sys.argv[1]
+    else:
+        # Fallback на тестовое изображение, если нет аргумента
+        input_file_path = INPUT_PATH_FALLBACK
+        logger.warning(f"Не указан входной файл. Используется путь по умолчанию: {input_file_path}")
 
-    original_frame = cv2.imread(TEST_FRAME_PATH)
+    # 2. Загрузка кадра
+    original_frame = get_frame_from_input(input_file_path)
+    
     if original_frame is None:
-        print("[ERROR] Не удалось загрузить изображение.")
+        logger.error("Не удалось загрузить кадр для калибровки. Проверьте путь и формат файла.")
         sys.exit(1)
         
     current_source_image = original_frame.copy()
@@ -103,7 +138,7 @@ if __name__ == "__main__":
     cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
     cv2.setMouseCallback(window_name, click_event)
     
-    print("ИНСТРУКЦИЯ:")
+    print("\nИНСТРУКЦИЯ:")
     print("  1. Выберите 4 угла сцены, которую вы хотите выпрямить (например, углы фасада или стен).")
     print("  2. ПОРЯДОК СТРОГО ОБЯЗАТЕЛЕН:")
     print("     P1: Верхний Левый -> P2: Верхний Правый -> P3: Нижний Правый -> P4: Нижний Левый.")
@@ -111,7 +146,7 @@ if __name__ == "__main__":
     
     while True:
         temp_img = current_source_image.copy()
-        status_text = f"{len(source_points)}/4 points." if len(source_points) < 4 else "4 points chosen. Press ENTER."
+        status_text = f"Points: {len(source_points)}/4" if len(source_points) < 4 else "4 points chosen. Press ENTER."
         
         cv2.putText(temp_img, status_text, (10, 30), 
                     cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
@@ -120,11 +155,11 @@ if __name__ == "__main__":
         key = cv2.waitKey(10)
         
         if key == 13 and len(source_points) == 4:
-            calculate_homography()
+            calculate_homography(original_frame)
             break
         
         if key == 27:
-            print("\nПрервано пользователем. Матрица не сохранена.")
+            logger.info("\nПрервано пользователем. Матрица не сохранена.")
             break
             
     cv2.destroyAllWindows()

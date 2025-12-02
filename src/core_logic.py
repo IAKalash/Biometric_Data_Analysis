@@ -4,6 +4,9 @@ import statistics
 from typing import Dict, List, Optional, Tuple, Any
 from dataclasses import dataclass
 import time
+import json
+import os
+import cv2
 from loguru import logger
 from config_opt import settings
 import math 
@@ -47,7 +50,7 @@ class PersonState:
     def add_height(self, h_cm: float):
         self.height_history.append(float(h_cm)) 
 
-# Модуль Нормализации (Geometry Engine)
+# Модуль Нормализации и Геометрии
 class GeometryEngine:
     def __init__(self):
         self.homography_matrix = None
@@ -56,30 +59,44 @@ class GeometryEngine:
         self.height_samples: deque = deque(maxlen=30) 
         self.last_calib_time = time.time()
         
+        # Загрузка матрицы при инициализации
+        if settings.HOMOGRAPHY_ENABLED:
+            self.load_homography_matrix(settings.HOMOGRAPHY_MATRIX_PATH)
+        
+    def load_homography_matrix(self, path: str):
+        """Загружает матрицу H из JSON."""
+        if not os.path.exists(path):
+            logger.error(f"Homography matrix not found: {path}")
+            return
+        try:
+            with open(path, 'r') as f:
+                H_list = json.load(f)
+            self.homography_matrix = np.array(H_list, dtype=np.float64)
+            logger.info(f"Homography matrix loaded from: {path}")
+        except Exception as e:
+            logger.error(f"Error loading homography matrix: {e}")
+
+    def normalize_frame(self, frame: np.ndarray) -> np.ndarray:
+        """Применяет гомографию к кадру, если матрица загружена."""
+        if self.homography_matrix is not None:
+            return cv2.warpPerspective(frame, self.homography_matrix, settings.TARGET_SIZE)
+        return frame
+
     def calibrate_simple(self, px_height: float, ref_height_cm: float = 175.0):
-        """Простая линейная калибровка"""
+        """Простая линейная калибровка (работает лучше на нормализованном кадре)"""
         if px_height <= 10: return
 
         self.height_samples.append(float(px_height)) 
         
-        if len(self.height_samples) % 10 == 0:
-            logger.debug(f"Calib samples: {len(self.height_samples)}. Last px: {px_height:.1f}")
-
         if len(self.height_samples) >= 15 and (time.time() - self.last_calib_time > 1.0):
             median_px = statistics.median(self.height_samples)
             
-            # Защита от слишком маленьких объектов (менее 10% кадра)
-            if median_px > 100: 
+            if median_px > 50: # Порог можно снизить, так как на warped image люди могут быть дальше
                 self.px_to_cm_ratio = float(ref_height_cm) / float(median_px) 
                 self.is_calibrated = True
                 self.last_calib_time = time.time()
                 self.height_samples.clear()
-                logger.success(f"CALIBRATION DONE! 1px = {self.px_to_cm_ratio:.4f} cm. (Median Height: {median_px:.1f}px)")
-            else:
-                # Если медиана слишком маленькая - человек далеко или ошибка детекции. Сбрасываем.
-                if len(self.height_samples) >= 29:
-                    self.height_samples.clear()
-                    logger.warning(f"Calibration reset: object too small ({median_px:.1f}px). Step closer.")
+                logger.success(f"CALIBRATION UPDATE: 1px = {self.px_to_cm_ratio:.4f} cm. (Median Height: {median_px:.1f}px)")
 
     def get_features(self, kps: np.ndarray, bbox: np.ndarray) -> Tuple[Dict, Optional[Tuple[float, float]]]:
         x1, y1, x2, y2 = bbox
@@ -90,6 +107,7 @@ class GeometryEngine:
         shoulder_l = self._kp(kps, 5)
         shoulder_r = self._kp(kps, 6)
         
+        # Считаем ширину плеч
         shoulder_width_px = math.dist(shoulder_l, shoulder_r) if shoulder_l and shoulder_r else 0.0
         
         features = {
@@ -115,9 +133,6 @@ class GeometryEngine:
         return None
 
 class AnomalyAuditor:
-    def __init__(self):
-        pass
-
     def compute_feature_vector(self, kps: Dict, state: PersonState, geometry: GeometryEngine) -> Dict[str, Any]:
         bbox_np = kps['box'] 
         kps_np = kps['kpts'].xy[0].cpu().numpy() if hasattr(kps.get('kpts'), 'xy') else np.array([])
@@ -161,15 +176,18 @@ class AnomalyAuditor:
         r = features['ratio_sh_h']
         v = features['speed_cm_s']
         
+        # Игнорируем слишком маленькие значения (шум)
         if h < 50: return [] 
 
-        if r > 0.35: 
-            anomalies.append({
+        # 1. Аномалия пропорций (Маскировка)
+        if r > settings.REF_SHOULDER_RATIO[1] + 0.05:
+             anomalies.append({
                 "type": "MASKING_RISK",
                 "conf": 0.85, 
-                "desc": f"Disproportionate shoulders ({s:.1f}cm) for height ({h:.1f}cm)"
+                "desc": f"Shoulders too wide ({s:.1f}cm) for height ({h:.1f}cm). Ratio: {r:.2f}"
             })
             
+        # 2. Аномалия скорости
         if v > settings.SPEED_ANOMALY_THRESHOLD:
             conf_val = float(min(v / 400.0, 0.99))
             anomalies.append({

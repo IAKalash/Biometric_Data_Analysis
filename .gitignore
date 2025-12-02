@@ -1,3 +1,4 @@
 models/
 results/
 src/__pycache__
+anomalies/
